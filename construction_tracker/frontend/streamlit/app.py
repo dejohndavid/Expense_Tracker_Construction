@@ -1,31 +1,33 @@
-# ruff: noqa: E402
-import sys
+from __future__ import annotations
+
 from collections.abc import Iterable
 from decimal import Decimal
-from pathlib import Path
 from typing import Any
 
 import streamlit as st
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from backend.config.settings import get_settings  # noqa: E402
-from backend.modules.imports.hdfc_parser import (
-    HdfcParseError,
-    parse_hdfc_text_statement,
-)  # noqa: E402
-from backend.modules.imports.review import (  # noqa: E402
+from backend.config.settings import get_settings
+from backend.db.session import create_all_tables, get_db
+from backend.modules.imports.hdfc_parser import HdfcParseError, parse_hdfc_text_statement
+from backend.modules.imports.review import (
     ReviewRow,
     build_review_rows,
     ready_ledger_rows,
     rows_to_csv,
     sum_debits,
 )
-from backend.modules.vendors.rule_engine import DEFAULT_RULES, MatchStatus  # noqa: E402
+from backend.modules.reports.service import get_spend_summary
+from backend.modules.transactions.service import save_review_rows
+from backend.modules.vendors.rule_engine import DEFAULT_RULES, MatchStatus
+from backend.modules.vendors.rule_loader import seed_default_rules
 
 settings = get_settings()
+
+# Ensure tables exist and rules are seeded on first run
+create_all_tables()
+_db_init = next(get_db())
+seed_default_rules(_db_init)
+_db_init.close()
 
 st.set_page_config(page_title=settings.app_name, page_icon="₹", layout="wide")
 
@@ -93,7 +95,9 @@ metric_columns[4].metric("Ready debit", _format_currency(ready_debits))
 
 st.caption(f"Total debit imported: {_format_currency(total_debits)}")
 
-review_tab, ledger_tab, rules_tab = st.tabs(["Import Review", "Ready Ledger", "Rules"])
+review_tab, ledger_tab, reports_tab, rules_tab = st.tabs(
+    ["Import Review", "Ready Ledger", "Reports", "Rules"]
+)
 
 with review_tab:
     st.subheader("Review transactions")
@@ -125,12 +129,26 @@ with review_tab:
             )
         },
     )
-    st.download_button(
-        "Download reviewed CSV",
-        rows_to_csv(edited_rows),
-        file_name="hdfc_import_review.csv",
-        mime="text/csv",
-    )
+
+    col_csv, col_save = st.columns([3, 1])
+    with col_csv:
+        st.download_button(
+            "Download reviewed CSV",
+            rows_to_csv(edited_rows),
+            file_name="hdfc_import_review.csv",
+            mime="text/csv",
+        )
+    with col_save:
+        if st.button("Save to database", type="primary"):
+            db_gen = get_db()
+            db = next(db_gen)
+            try:
+                saved = save_review_rows(db, edited_rows)
+                st.success(f"Saved {len(saved)} transactions to the database.")
+            except Exception as exc:
+                st.error(f"Could not save: {exc}")
+            finally:
+                db.close()
 
 with ledger_tab:
     st.subheader("Ledger export")
@@ -147,6 +165,55 @@ with ledger_tab:
         mime="text/csv",
         disabled=not ledger_rows,
     )
+
+with reports_tab:
+    st.subheader("Spend reports")
+    db_gen = get_db()
+    db = next(db_gen)
+    try:
+        summary = get_spend_summary(db)
+    finally:
+        db.close()
+
+    if summary.total_transactions == 0:
+        st.info("No transactions in the database yet. Save an import to see reports.")
+    else:
+        r1, r2, r3, r4 = st.columns(4)
+        r1.metric("Total transactions", summary.total_transactions)
+        r2.metric("Ready", summary.ready_count)
+        r3.metric("Needs review", summary.review_count)
+        r4.metric("Ready spend", _format_currency(summary.ready_debit))
+
+        if summary.by_category:
+            st.subheader("Spend by category")
+            st.dataframe(
+                [
+                    {
+                        "category": row.category,
+                        "subcategory": row.subcategory,
+                        "transactions": row.transaction_count,
+                        "total_debit": _format_currency(row.total_debit),
+                    }
+                    for row in summary.by_category
+                ],
+                hide_index=True,
+                width="stretch",
+            )
+
+        if summary.by_stage:
+            st.subheader("Spend by stage")
+            st.dataframe(
+                [
+                    {
+                        "stage": row.stage,
+                        "transactions": row.transaction_count,
+                        "total_debit": _format_currency(row.total_debit),
+                    }
+                    for row in summary.by_stage
+                ],
+                hide_index=True,
+                width="stretch",
+            )
 
 with rules_tab:
     st.subheader("Classification rules")

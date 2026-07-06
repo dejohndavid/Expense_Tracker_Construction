@@ -1,10 +1,10 @@
-.PHONY: api ui lint format test clean
+.PHONY: api ui lint format test db-upgrade db-downgrade db-revision clean
 
 api:
 	uv run uvicorn backend.main:app --reload
 
 ui:
-	uv run streamlit run frontend/streamlit/app.py
+	PYTHONPATH=. uv run streamlit run frontend/streamlit/app.py
 
 lint:
 	uv run ruff check .
@@ -17,6 +17,15 @@ format:
 
 test:
 	uv run pytest
+
+db-upgrade:
+	uv run alembic upgrade head
+
+db-downgrade:
+	uv run alembic downgrade -1
+
+db-revision:
+	uv run alembic revision --autogenerate -m "$(msg)"
 
 clean:
 	find . -type d -name "__pycache__" -prune -exec rm -rf {} +
