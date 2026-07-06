@@ -26,7 +26,12 @@ from backend.modules.imports.review import (  # noqa: E402
     sum_debits,
 )
 from backend.modules.reports.service import get_spend_summary  # noqa: E402
-from backend.modules.transactions.service import save_review_rows  # noqa: E402
+from backend.modules.transactions.service import (  # noqa: E402
+    find_batch_by_hash,
+    hash_statement,
+    load_batch_review_rows,
+    save_review_rows,
+)
 from backend.modules.vendors.rule_engine import MatchStatus  # noqa: E402
 from backend.modules.vendors.rule_loader import (  # noqa: E402
     add_rule,
@@ -42,7 +47,6 @@ from sqlalchemy.orm import sessionmaker  # noqa: E402
 
 settings = get_settings()
 
-# Ensure tables and default rules exist
 Base.metadata.create_all(bind=_engine())
 _SessionFactory = sessionmaker(bind=_engine())
 
@@ -87,6 +91,19 @@ def _rule_table_rows(records: list[ClassificationRuleRecord]) -> list[dict[str, 
     ]
 
 
+# ── Session state keys ────────────────────────────────────────────────────────
+# review_rows  : list[ReviewRow] — current working set (persists across reruns)
+# current_hash : str | None      — SHA-256 of the file in the current working set
+# from_db      : bool            — whether the rows were loaded from DB (not freshly parsed)
+
+if "review_rows" not in st.session_state:
+    st.session_state["review_rows"] = []
+if "current_hash" not in st.session_state:
+    st.session_state["current_hash"] = None
+if "from_db" not in st.session_state:
+    st.session_state["from_db"] = False
+
+# ── Header ────────────────────────────────────────────────────────────────────
 st.title(settings.app_name)
 st.caption(f"Version {settings.app_version}")
 
@@ -96,34 +113,65 @@ uploaded_file = st.file_uploader(
     help="Use the Text export from HDFC NetBanking.",
 )
 
-# Load DB rules once per rerun — used for both classification and the Rules tab
+# Load DB rules for classification
 _rules_db = _db()
 try:
     active_rules = load_rules(_rules_db)
 finally:
     _rules_db.close()
 
-if uploaded_file is None:
+# ── File handling: dedup + parse ──────────────────────────────────────────────
+if uploaded_file is not None:
+    raw_bytes = uploaded_file.getvalue()
+    file_hash = hash_statement(raw_bytes)
+
+    if file_hash != st.session_state["current_hash"]:
+        # New file — check DB first
+        db = _db()
+        try:
+            existing_batch = find_batch_by_hash(db, file_hash)
+            if existing_batch:
+                rows_from_db = load_batch_review_rows(db, existing_batch.id)
+            else:
+                rows_from_db = None
+        finally:
+            db.close()
+
+        if existing_batch and rows_from_db:
+            st.session_state["review_rows"] = rows_from_db
+            st.session_state["current_hash"] = file_hash
+            st.session_state["from_db"] = True
+            st.info(
+                f"This file was already imported on "
+                f"{existing_batch.created_at[:10]}. "
+                f"Showing the saved review — you can still edit and re-save."
+            )
+        else:
+            try:
+                statement_text = raw_bytes.decode("utf-8", errors="replace")
+                transactions = parse_hdfc_text_statement(statement_text)
+                st.session_state["review_rows"] = build_review_rows(transactions, active_rules)
+                st.session_state["current_hash"] = file_hash
+                st.session_state["from_db"] = False
+            except HdfcParseError as exc:
+                st.error(f"Could not parse this HDFC statement: {exc}")
+                st.stop()
+
+if not st.session_state["review_rows"]:
     st.info("Upload the HDFC Text statement to parse transactions and review construction matches.")
     st.divider()
     _manage_rules_placeholder = st.container()
 else:
     _manage_rules_placeholder = None
 
-if uploaded_file is not None:
-    try:
-        statement_text = uploaded_file.getvalue().decode("utf-8", errors="replace")
-        transactions = parse_hdfc_text_statement(statement_text)
-    except HdfcParseError as exc:
-        st.error(f"Could not parse this HDFC statement: {exc}")
-        st.stop()
-
-    review_rows = build_review_rows(transactions, active_rules)
+# ── Main UI (shown once rows are in session state) ────────────────────────────
+if st.session_state["review_rows"]:
+    review_rows: list[ReviewRow] = st.session_state["review_rows"]
 
     total_debits = sum_debits(review_rows)
-    ready_rows = [row for row in review_rows if row["import_status"] == MatchStatus.READY]
-    review_needed_rows = [row for row in review_rows if row["import_status"] == MatchStatus.REVIEW]
-    ignored_rows = [row for row in review_rows if row["import_status"] == MatchStatus.IGNORE]
+    ready_rows = [r for r in review_rows if r["import_status"] == MatchStatus.READY]
+    review_needed_rows = [r for r in review_rows if r["import_status"] == MatchStatus.REVIEW]
+    ignored_rows = [r for r in review_rows if r["import_status"] == MatchStatus.IGNORE]
     ready_debits = sum_debits(ready_rows)
 
     metric_columns = st.columns(5)
@@ -132,7 +180,6 @@ if uploaded_file is not None:
     metric_columns[2].metric("Needs review", len(review_needed_rows))
     metric_columns[3].metric("Ignored", len(ignored_rows))
     metric_columns[4].metric("Ready debit", _format_currency(ready_debits))
-
     st.caption(f"Total debit imported: {_format_currency(total_debits)}")
 
     review_tab, ledger_tab, reports_tab, rules_tab = st.tabs(
@@ -169,6 +216,9 @@ if uploaded_file is not None:
                 )
             },
         )
+        # Keep session state in sync with any edits made in the table
+        st.session_state["review_rows"] = edited_rows
+
         col_csv, col_save = st.columns([3, 1])
         with col_csv:
             st.download_button(
@@ -178,11 +228,24 @@ if uploaded_file is not None:
                 mime="text/csv",
             )
         with col_save:
-            if st.button("Save to database", type="primary"):
+            save_label = "Update in database" if st.session_state["from_db"] else "Save to database"
+            if st.button(save_label, type="primary"):
                 db = _db()
                 try:
-                    saved = save_review_rows(db, edited_rows)
-                    st.success(f"Saved {len(saved)} transactions to the database.")
+                    result = save_review_rows(
+                        db,
+                        edited_rows,
+                        file_hash=st.session_state["current_hash"],
+                        file_name=uploaded_file.name if uploaded_file else "unknown",
+                    )
+                    st.session_state["from_db"] = True
+                    if result.skipped:
+                        st.success(
+                            f"Saved {result.saved} transactions. "
+                            f"{result.skipped} already existed and were skipped."
+                        )
+                    else:
+                        st.success(f"Saved {result.saved} transactions to the database.")
                 except Exception as exc:
                     st.error(f"Could not save: {exc}")
                 finally:
@@ -257,7 +320,7 @@ if uploaded_file is not None:
 else:
     _render_rules_tab = _manage_rules_placeholder  # type: ignore[assignment]
 
-# Rules management — rendered in either the tab or the placeholder below the upload prompt
+# ── Rules management ──────────────────────────────────────────────────────────
 with _render_rules_tab:  # type: ignore[attr-defined]
     st.subheader("Classification rules")
 
