@@ -14,6 +14,31 @@ def _decode_keyword_groups(raw: str) -> tuple[tuple[str, ...], ...]:
     return tuple(tuple(group.split("|")) for group in raw.strip().splitlines() if group.strip())
 
 
+def keyword_text_to_raw(text: str) -> str:
+    """Convert user-entered keyword text to stored format.
+
+    Each line is one keyword group; keywords within a group are comma-separated.
+    Example input:  "MADESH, JCB\\nJCB"
+    Stored as:      "MADESH|JCB\\nJCB"
+    """
+    groups = []
+    for line in text.strip().splitlines():
+        keywords = [k.strip().upper() for k in line.split(",") if k.strip()]
+        if keywords:
+            groups.append("|".join(keywords))
+    return "\n".join(groups)
+
+
+def raw_to_keyword_text(raw: str) -> str:
+    """Convert stored format back to user-friendly text."""
+    groups = []
+    for line in raw.strip().splitlines():
+        keywords = [k.strip() for k in line.split("|") if k.strip()]
+        if keywords:
+            groups.append(", ".join(keywords))
+    return "\n".join(groups)
+
+
 def seed_default_rules(db: Session) -> None:
     """Insert DEFAULT_RULES into the DB if the table is empty."""
     if db.query(ClassificationRuleRecord).count() > 0:
@@ -56,3 +81,59 @@ def load_rules(db: Session) -> tuple[ClassificationRule, ...]:
         )
         for r in records
     )
+
+
+def list_all_rules(db: Session) -> list[ClassificationRuleRecord]:
+    """Return all rules (enabled and disabled) ordered by priority descending."""
+    return (
+        db.query(ClassificationRuleRecord)
+        .order_by(ClassificationRuleRecord.priority.desc(), ClassificationRuleRecord.id)
+        .all()
+    )
+
+
+def add_rule(
+    db: Session,
+    *,
+    name: str,
+    keyword_groups_raw: str,
+    vendor: str,
+    category: str,
+    subcategory: str,
+    stage: str,
+    payment_mode: str,
+    priority: int = 100,
+) -> ClassificationRuleRecord:
+    record = ClassificationRuleRecord(
+        name=name,
+        keyword_groups_raw=keyword_groups_raw,
+        vendor=vendor,
+        category=category,
+        subcategory=subcategory,
+        stage=stage,
+        payment_mode=payment_mode,
+        priority=priority,
+        enabled=True,
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+    return record
+
+
+def delete_rule(db: Session, rule_id: int) -> bool:
+    record = db.get(ClassificationRuleRecord, rule_id)
+    if record is None:
+        return False
+    db.delete(record)
+    db.commit()
+    return True
+
+
+def toggle_rule(db: Session, rule_id: int, *, enabled: bool) -> bool:
+    record = db.get(ClassificationRuleRecord, rule_id)
+    if record is None:
+        return False
+    record.enabled = enabled  # type: ignore[assignment]
+    db.commit()
+    return True
