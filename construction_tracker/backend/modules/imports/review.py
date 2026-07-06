@@ -7,7 +7,12 @@ from io import StringIO
 from typing import TypedDict
 
 from backend.modules.imports.hdfc_parser import HdfcTransaction
-from backend.modules.vendors.rule_engine import MatchStatus, classify_transaction
+from backend.modules.vendors.rule_engine import (
+    ClassificationRule,
+    DEFAULT_RULES,
+    MatchStatus,
+    classify_transaction,
+)
 
 
 class ReviewRow(TypedDict):
@@ -35,10 +40,13 @@ class ReviewRow(TypedDict):
     manual_notes: str
 
 
-def build_review_rows(transactions: Sequence[HdfcTransaction]) -> list[ReviewRow]:
+def build_review_rows(
+    transactions: Sequence[HdfcTransaction],
+    rules: Sequence[ClassificationRule] = DEFAULT_RULES,
+) -> list[ReviewRow]:
     rows: list[ReviewRow] = []
     for transaction in transactions:
-        match = classify_transaction(transaction)
+        match = classify_transaction(transaction, rules)
         metadata = transaction.metadata
         rows.append(
             {
