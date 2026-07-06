@@ -1,0 +1,56 @@
+[project]
+name = "finance-engine"
+version = "0.1.0"
+description = "Construction expense finance engine for HDFC statement imports and review workflows."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi",
+  "uvicorn",
+  "streamlit",
+  "sqlalchemy",
+  "alembic",
+  "pydantic",
+  "pydantic-settings",
+  "loguru",
+  "python-dotenv",
+]
+
+[dependency-groups]
+dev = [
+  "pytest",
+  "pytest-cov",
+  "black",
+  "ruff",
+  "mypy",
+  "pre-commit",
+]
+
+[tool.uv]
+package = false
+
+[tool.black]
+line-length = 100
+target-version = ["py312"]
+exclude = "/(\\.venv|work|outputs)/"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+exclude = [".venv", "work", "outputs"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+ignore = []
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+exclude = ["work", "outputs", ".venv"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
