@@ -2,16 +2,30 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from sqlalchemy import Numeric, String, Text
+from sqlalchemy import ForeignKey, Numeric, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.db.base import Base
+
+
+class ImportBatch(Base):
+    __tablename__ = "import_batches"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    file_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    file_name: Mapped[str] = mapped_column(String(256))
+    created_at: Mapped[str] = mapped_column(String(32))
+    row_count: Mapped[int] = mapped_column(default=0)
+
+    def __repr__(self) -> str:
+        return f"<ImportBatch id={self.id} file={self.file_name!r} hash={self.file_hash[:8]}>"
 
 
 class TransactionRecord(Base):
     __tablename__ = "transactions"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    batch_id: Mapped[int | None] = mapped_column(ForeignKey("import_batches.id"), nullable=True)
     transaction_date: Mapped[str] = mapped_column(String(10))
     value_date: Mapped[str] = mapped_column(String(10))
     narration: Mapped[str] = mapped_column(Text)
